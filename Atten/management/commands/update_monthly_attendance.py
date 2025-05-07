@@ -8,26 +8,36 @@ class Command(BaseCommand):
 
     def handle(self, *args, **kwargs):
         today = timezone.now().date()
-        first_day_of_month = today.replace(day=1)
-        last_month = (first_day_of_month - datetime.timedelta(days=1)).replace(day=1)
-        next_month = (last_month + datetime.timedelta(days=32)).replace(day=1)
+        yesterday = today - datetime.timedelta(days=1)
 
-        users = DailyAttendance.objects.values_list('user', flat=True).distinct()
-
+        # 先执行月度考勤更新
+        users = DailyAttendance.objects.filter(date=yesterday).values_list('user', flat=True).distinct()
         for user_id in users:
-            # 计算用户上个月的有效工作天数
-            work_days = DailyAttendance.objects.filter(
+            # 计算昨日正常出勤情况
+            is_workday = DailyAttendance.objects.filter(
                 user_id=user_id,
-                date__gte=last_month,
-                date__lt=next_month,
+                date=yesterday,
                 status='正常'
-            ).count()
+            ).exists()
 
-            # 更新或创建 MonthlyAttendance 记录
-            MonthlyAttendance.objects.update_or_create(
-                user_id=user_id,
-                month=last_month,
-                defaults={'work_days': work_days}
-            )
+            if is_workday:
+                # 获取或创建本月记录
+                monthly_record, created = MonthlyAttendance.objects.get_or_create(
+                    user_id=user_id,
+                    month=yesterday.replace(day=1),
+                    defaults={'work_days': 1}
+                )
 
-            self.stdout.write(self.style.SUCCESS(f'成功更新用户 {user_id} 的月考勤记录'))
+                if not created:
+                    # 仅当未创建新记录时才更新
+                    monthly_record.work_days += 1
+                    monthly_record.save()
+
+                self.stdout.write(self.style.SUCCESS(f'更新用户 {user_id} 的月考勤记录'))
+
+        # 再执行数据清理
+        try:
+            DailyAttendance.objects.filter(date=yesterday).delete()
+            self.stdout.write(self.style.SUCCESS(f'成功清理 {yesterday} 的日考勤记录'))
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f'清理日考勤记录失败: {str(e)}'))
